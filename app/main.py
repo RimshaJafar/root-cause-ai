@@ -1,6 +1,10 @@
-from pathlib import Path
 
-from app.agent.graph import build_agent
+from pathlib import Path
+from uuid import uuid4
+
+from langgraph.types import Command
+
+from app.agent.workflow import build_workflow
 
 
 def main():
@@ -11,10 +15,14 @@ def main():
         "Enter the project directory to investigate: "
     ).strip().strip('"')
 
-    project_path = Path(project_root).expanduser().resolve()
+    project_path = Path(
+        project_root
+    ).expanduser().resolve()
 
     if not project_path.is_dir():
-        print("Error: The selected project directory does not exist.")
+        print(
+            "\nError: The selected project directory does not exist."
+        )
         return
 
     bug_report = input(
@@ -22,11 +30,12 @@ def main():
     ).strip()
 
     if not bug_report:
-        print("Error: Bug description cannot be empty.")
+        print("\nError: Bug description cannot be empty.")
         return
 
     print(
-        "\nPaste the traceback. Type END on a new line when finished."
+        "\nPaste the traceback. "
+        "Type END on a new line when finished."
     )
 
     traceback_lines = []
@@ -41,43 +50,79 @@ def main():
 
     traceback_text = "\n".join(traceback_lines)
 
-    user_message = f"""
-BUG REPORT:
-{bug_report}
+    initial_state = {
+        "project_root": str(project_path),
+        "bug_report": bug_report,
+        "traceback_text": traceback_text,
+        "attempt_count": 0,
+        "max_attempts": 3,
+        "investigation_history": [],
+        "investigation_plan": [],
+        "is_sufficient": False,
+        "approved": False,
+    }
 
-TRACEBACK:
-{traceback_text if traceback_text.strip() else "No traceback supplied."}
-
-Investigate this bug using the available project tools.
-Return an evidence-based debugging report.
-"""
-
-    print("\nStarting investigation...\n")
+    config = {
+        "configurable": {
+            "thread_id": str(uuid4()),
+        },
+        "recursion_limit": 30,
+    }
 
     try:
-        agent = build_agent(str(project_path))
 
-        result = agent.invoke(
-            {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": user_message,
-                    }
-                ]
-            },
-            config={
-                "recursion_limit": 15
-            },
+        workflow = build_workflow()
+
+        print("\nStarting RootCause AI workflow...\n")
+
+        result = workflow.invoke(
+            initial_state,
+            config=config,
         )
 
-        final_message = result["messages"][-1]
+        # Check whether the workflow paused for approval.
+        interruptions = result.get("__interrupt__", [])
 
-        print("\n========== INVESTIGATION REPORT ==========\n")
-        print(final_message.content)
+        if interruptions:
+
+            print(
+                "\n========== REPORT READY FOR REVIEW ==========\n"
+            )
+
+            print(result.get("final_report", ""))
+
+            approval = input(
+                "\nDo you approve this report? (yes/no): "
+            ).strip().lower()
+
+            approved = approval in {
+                "yes",
+                "y",
+            }
+
+            # Resume the paused workflow.
+            result = workflow.invoke(
+                Command(resume=approved),
+                config=config,
+            )
+
+        if result.get("approved", False):
+            print("\nReport approved.")
+        else:
+            print("\nReport was not approved.")
+
+        print(
+            "\nInvestigation attempts:",
+            result.get("attempt_count", 0),
+        )
+
+    except KeyboardInterrupt:
+        print("\nInvestigation cancelled by user.")
 
     except Exception as error:
-        print(f"\nInvestigation failed: {error}")
+        print(
+            f"\nInvestigation failed: {error}"
+        )
 
 
 if __name__ == "__main__":

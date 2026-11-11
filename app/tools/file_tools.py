@@ -1,3 +1,4 @@
+
 from pathlib import Path
 
 
@@ -9,6 +10,8 @@ IGNORED_DIRS = {
     "node_modules",
     ".pytest_cache",
     ".mypy_cache",
+    ".idea",
+    ".vscode",
 }
 
 SENSITIVE_NAMES = {
@@ -29,6 +32,23 @@ SENSITIVE_SUFFIXES = {
 }
 
 MAX_FILE_SIZE = 100_000
+MAX_LIST_RESULTS = 200
+
+
+def is_sensitive_path(path: Path) -> bool:
+    """Check whether a path contains sensitive names or directories."""
+    parts = [part.lower() for part in path.parts]
+
+    if any(part in IGNORED_DIRS for part in parts):
+        return True
+
+    name = path.name.lower()
+
+    return (
+        name in SENSITIVE_NAMES
+        or name.startswith(".env")
+        or path.suffix.lower() in SENSITIVE_SUFFIXES
+    )
 
 
 class ProjectFileTools:
@@ -50,22 +70,21 @@ class ProjectFileTools:
         resolved = (self.project_root / requested).resolve()
 
         if not resolved.is_relative_to(self.project_root):
-            raise ValueError("Access outside project is not allowed.")
+            raise ValueError(
+                "Access outside project is not allowed."
+            )
 
-        if any(part in IGNORED_DIRS for part in resolved.relative_to(
-            self.project_root
-        ).parts):
-            raise PermissionError("Access to this directory is denied.")
+        relative = resolved.relative_to(self.project_root)
 
-        if (
-            resolved.name.lower() in SENSITIVE_NAMES
-            or resolved.suffix.lower() in SENSITIVE_SUFFIXES
-            or resolved.name.lower().startswith(".env")
-        ):
-            raise PermissionError("Access to sensitive files is denied.")
+        if is_sensitive_path(relative):
+            raise PermissionError(
+                "Access to this path is denied."
+            )
 
         if not resolved.is_file():
-            raise FileNotFoundError(f"File not found: {file_path}")
+            raise FileNotFoundError(
+                f"File not found: {file_path}"
+            )
 
         return resolved
 
@@ -77,7 +96,7 @@ class ProjectFileTools:
 
         content = path.read_text(
             encoding="utf-8",
-            errors="replace"
+            errors="replace",
         )
 
         return {
@@ -86,22 +105,25 @@ class ProjectFileTools:
             "success": True,
         }
 
-
     def list_files(self, directory: str = ".") -> dict:
-        if directory == ".":
-            target = self.project_root
-        else:
-            requested = Path(directory)
+        requested = Path(directory)
 
-            if requested.is_absolute():
-                raise ValueError("Absolute paths are not allowed.")
+        if requested.is_absolute():
+            raise ValueError("Absolute paths are not allowed.")
 
-            target = (
-                self.project_root / requested
-            ).resolve()
+        target = (self.project_root / requested).resolve()
 
         if not target.is_relative_to(self.project_root):
-            raise ValueError("Access outside project is not allowed.")
+            raise ValueError(
+                "Access outside project is not allowed."
+            )
+
+        relative_target = target.relative_to(self.project_root)
+
+        if is_sensitive_path(relative_target):
+            raise PermissionError(
+                "Access to this directory is denied."
+            )
 
         if not target.is_dir():
             raise NotADirectoryError(
@@ -111,27 +133,34 @@ class ProjectFileTools:
         files = []
 
         for path in target.rglob("*"):
-
-            relative = path.relative_to(self.project_root)
-
-            if any(part in IGNORED_DIRS for part in relative.parts):
+            # Do not follow or include symbolic links.
+            if path.is_symlink():
                 continue
 
-            if (
-                path.name.lower().startswith(".env")
-                or path.name.lower() in SENSITIVE_NAMES
-                or path.suffix.lower() in SENSITIVE_SUFFIXES
-            ):
-                continue
+            try:
+                relative = path.relative_to(self.project_root)
 
-            if path.is_file():
+                if is_sensitive_path(relative):
+                    continue
+
+                if not path.is_file():
+                    continue
+
+                resolved = path.resolve()
+
+                if not resolved.is_relative_to(self.project_root):
+                    continue
+
                 files.append(relative.as_posix())
 
-            if len(files) >= 200:
-                break
+                if len(files) >= MAX_LIST_RESULTS:
+                    break
+
+            except (OSError, ValueError):
+                continue
 
         return {
             "directory": directory,
             "files": files,
-            "truncated": len(files) >= 200,
-        }    
+            "truncated": len(files) >= MAX_LIST_RESULTS,
+        }
